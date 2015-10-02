@@ -96,3 +96,6 @@ if __name__ == '__main__':
              page_names,
              iterations=10,
              inspect=[Kevin_Bacon, Harvard_University])
+
+
+#  aws emr create-cluster --name "Spark cluster" --release-label emr-4.1.0 --applications Name=Spark --ec2-attributes KeyName=SparkKeyPair --instance-type m3.xlarge --instance-count 5 --use-default-roles
