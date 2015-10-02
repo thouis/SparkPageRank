@@ -1,10 +1,10 @@
 import pyspark
 
-
 def link_string_to_KV(s):
     src, dests = s.split(': ')
     dests = [int(to) for to in dests.split(' ')]
     return (int(src), dests)
+
 
 def copartitioned(RDD1, RDD2):
     "check if two RDDs are copartitioned"
@@ -25,44 +25,74 @@ def pagerank(neighbors,
              inspect=[]):
     ''' run the pagerank algorithm'''
 
-    give_fraction = 0.85
-    keep_fraction = 0.15
+    # PageRank has two constants that control its behavior.
+    #
+    # click_fraction is what percentage of the time a hypothetical random
+    # surfer clicks on a link on their current page.
+    #
+    # jump_fraction is the percentage of the time that they jump to a random
+    # page, instead.
+    #
+    # they should sum to 1.0
+    click_fraction = 0.85
+    jump_fraction = 0.15
 
-    # set each node to rank 1.0
+    # set each node to rank 1.0, so all nodes equal
+    # (in many implementations, this is set to 1.0 / number_of_pages)
     page_ranks = neighbors.mapValues(lambda _: 1.0)
+    assert copartitioned(neighbors, page_ranks)
 
+    #########################################################################
     # neighbors and page_ranks are now copartitioned.  We want this to always
     # be true!
+    #########################################################################
 
     for i in range(iterations):
-        # bring weights and neighbors together.
+        # bring weights and neighbors together, using join()
         # First make sure they are copartitioned.
         assert copartitioned(neighbors, page_ranks)
+
+        # There is no shuffle here, though there may be some communication for
+        # partitions that are on different nodes.
         neighbors_join_ranks = neighbors.join(page_ranks)
 
-        # push weights out to neighbors
+        # neighbors_join_ranks is now:
+        #     [(node, (neighbor_list, node_rank)), (node, (...)), ...]
+
+        # Push ranks out to neighbors
+        #
+        # Each page with out-links divides up its current rank and hands it off
+        # to its neighbors (scaled by click_fraction).
         out_ranks = neighbors_join_ranks.flatMapValues(
             lambda (neighbor_list, rank): push_to_neighbors(neighbor_list,
-                                                            rank, give_fraction))
+                                                            rank,
+                                                            click_fraction))
 
-        # We used flatMapValues, but that leaves the key in place.  We just
-        # want the values.
+        # We used flatMapValues to push ranks, but that leaves the key in
+        # place.  We just want the values, so strip them out.
         out_ranks = out_ranks.values()
 
-        # sum contribution to each node.  Use the same number of partitions as
+        # Sum ranks for each node.  Use the same number of partitions as
         # neighbors, so they end up copartitioned.
-        summed_ranks = out_ranks.reduceByKey(lambda x, y: x + y,
-                                             numPartitions=neighbors.getNumPartitions())
+        summed_ranks = out_ranks.reduceByKey(
+            lambda x, y: x + y, numPartitions=neighbors.getNumPartitions())
+
+        # Make sure what we just claimed about copartitioning is true!
         assert copartitioned(summed_ranks, neighbors)
 
-        # Add in keep_fraction, and update.
-        # Cache because this is the only RDD that is used in the next iteration.
-        page_ranks = summed_ranks.mapValues(lambda x: x + keep_fraction).cache()
+        # Add in jump_fraction, and update page_ranks.
 
+        ######################################################################
+        # Cache because this is the only RDD that is used in the next iteration.
+        ######################################################################
+        page_ranks = summed_ranks.mapValues(lambda x: x + jump_fraction).cache()
+
+        # Report current scores for the nodes in the inspect list.
         print("Iteration {0}".format(i))
         for node in inspect:
             print("   {0}: {1}".format(page_names.lookup(node)[0],
                                        page_ranks.lookup(node)[0]))
+
 
 if __name__ == '__main__':
     sc = pyspark.SparkContext()
@@ -76,19 +106,27 @@ if __name__ == '__main__':
 
     # create an RDD for looking up page names from numbers
     # remember that it's all 1-indexed
-    page_names = page_names.zipWithIndex().map(lambda (n, id): (id + 1, n)).sortByKey().cache()
-    # set up partitioning - we have roughly 8 workers, if we're on AWS with 2
-    # nodes not counting the driver.  This is 4 partitions per worker.
+    page_names = page_names.zipWithIndex().map(lambda (n, id): (id + 1, n))
+    page_names = page_names.sortByKey().cache()
+
+    #######################################################################
+    # set up partitioning - we have roughly 16 workers, if we're on AWS with 4
+    # nodes not counting the driver.  This is 16 partitions per worker.
+    #
     # Cache this result, so we don't recompute the link_string_to_KV() each time.
+    #######################################################################
     neighbor_graph = neighbor_graph.partitionBy(256).cache()
 
     # find Kevin Bacon
     Kevin_Bacon = page_names.filter(lambda (K, V): V == 'Kevin_Bacon').collect()
+    # This should be [(node_id, 'Kevin_Bacon')]
     assert len(Kevin_Bacon) == 1
     Kevin_Bacon = Kevin_Bacon[0][0]  # extract node id
 
     # find Harvard University
-    Harvard_University = page_names.filter(lambda (K, V): V == 'Harvard_University').collect()
+    Harvard_University = page_names.filter(lambda (K, V):
+                                           V == 'Harvard_University').collect()
+    # This should be [(node_id, 'Harvard_University')]
     assert len(Harvard_University) == 1
     Harvard_University = Harvard_University[0][0]  # extract node id
 
