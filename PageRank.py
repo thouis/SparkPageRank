@@ -12,10 +12,10 @@ def copartitioned(RDD1, RDD2):
 
 
 def push_to_neighbors(neighbor_list,
-                      weight,
+                      rank,
                       fraction):
     num_neighbors = len(neighbor_list)
-    w = weight * fraction / num_neighbors
+    w = rank * fraction / num_neighbors
     return [(n, w) for n in neighbor_list]
 
 
@@ -56,6 +56,8 @@ def pagerank(neighbors,
         # partitions that are on different nodes.
         neighbors_join_ranks = neighbors.join(page_ranks)
 
+        assert copartitioned(neighbors_join_ranks, neighbors)
+
         # neighbors_join_ranks is now:
         #     [(node, (neighbor_list, node_rank)), (node, (...)), ...]
 
@@ -63,14 +65,19 @@ def pagerank(neighbors,
         #
         # Each page with out-links divides up its current rank and hands it off
         # to its neighbors (scaled by click_fraction).
-        out_ranks = neighbors_join_ranks.flatMapValues(
+        #
+        # We first call .values(), because we don't care where the current rank
+        # is coming from, just where it's going to.
+        out_ranks = neighbors_join_ranks.values().flatMap(
             lambda (neighbor_list, rank): push_to_neighbors(neighbor_list,
                                                             rank,
                                                             click_fraction))
 
-        # We used flatMapValues to push ranks, but that leaves the key in
-        # place.  We just want the values, so strip them out.
-        out_ranks = out_ranks.values()
+        ######################################################################
+        # out_ranks is not copartitioned with neighbors.  That is OK, as we're
+        # not going to join it to anything.  The next step will re-partition it
+        # so that it is copartitioned.
+        ######################################################################
 
         # Sum ranks for each node.  Use the same number of partitions as
         # neighbors, so they end up copartitioned.
@@ -81,7 +88,6 @@ def pagerank(neighbors,
         assert copartitioned(summed_ranks, neighbors)
 
         # Add in jump_fraction, and update page_ranks.
-
         ######################################################################
         # Cache because this is the only RDD that is used in the next iteration.
         ######################################################################
@@ -137,3 +143,5 @@ if __name__ == '__main__':
 
 
 #  aws emr create-cluster --name "Spark cluster" --release-label emr-4.1.0 --applications Name=Spark --ec2-attributes KeyName=SparkKeyPair --instance-type m3.xlarge --instance-count 5 --use-default-roles
+
+# spark-submit --num-executors 4 --executor-cores 4 --executor-memory 8g PageRank.py
